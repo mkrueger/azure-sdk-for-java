@@ -52,6 +52,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
@@ -181,6 +182,8 @@ public final class RntbdClientChannelPool implements ChannelPool {
 
     private final ConcurrentHashMap<Channel, Channel> acquiredChannels = new ConcurrentHashMap<>();
     private final Deque<Channel> availableChannels = new ConcurrentLinkedDeque<>();
+    private final AtomicInteger availableChannelsSize = new AtomicInteger(0);
+
     private final AtomicBoolean closed = new AtomicBoolean();
     private final AtomicBoolean connecting = new AtomicBoolean();
 
@@ -316,7 +319,7 @@ public final class RntbdClientChannelPool implements ChannelPool {
             ensureInEventLoop();
         }
 
-        return this.acquiredChannels.size() + this.availableChannels.size() + (this.connecting.get() ? 1 : 0);
+        return this.acquiredChannels.size() + this.availableChannelsSize.get() + (this.connecting.get() ? 1 : 0);
     }
 
     /**
@@ -336,7 +339,7 @@ public final class RntbdClientChannelPool implements ChannelPool {
      * @return the current available channel count.
      */
     public int channelsAvailableMetrics() {
-        return this.availableChannels.size();
+        return this.availableChannelsSize.get();
     }
 
     /**
@@ -761,6 +764,7 @@ public final class RntbdClientChannelPool implements ChannelPool {
                 }
 
                 if (candidate != null && this.availableChannels.remove(candidate)) {
+                    this.availableChannelsSize.decrementAndGet();
                     this.doAcquireChannel(promise, candidate);
                     return;
                 }
@@ -774,6 +778,7 @@ public final class RntbdClientChannelPool implements ChannelPool {
 
                     if (channelState.isOk()) {
                         if (this.availableChannels.remove(channel)) {
+                            this.availableChannelsSize.decrementAndGet();
                             this.doAcquireChannel(promise, channel);
                             return;
                         }
@@ -872,7 +877,9 @@ public final class RntbdClientChannelPool implements ChannelPool {
         this.ensureInEventLoop();
         this.durableEndpointMetrics.incrementClosedChannels();
         this.acquiredChannels.remove(channel);
-        this.availableChannels.remove(channel);
+        if (this.availableChannels.remove(channel)) {
+            this.availableChannelsSize.decrementAndGet();
+        }
         channel.attr(POOL_KEY).set(null);
         channel.close().addListener(future -> {
             if (future.isDone() && !this.isClosed()) {
@@ -1018,6 +1025,8 @@ public final class RntbdClientChannelPool implements ChannelPool {
             ensureInEventLoop();
 
             this.availableChannels.addAll(this.acquiredChannels.values());
+            this.availableChannelsSize.addAndGet(this.acquiredChannels.size());
+
             this.acquiredChannels.clear();
 
             List<Channel> channelList = new ArrayList<>();
@@ -1296,7 +1305,11 @@ public final class RntbdClientChannelPool implements ChannelPool {
      */
     private boolean offerChannel(final Channel channel) {
         this.ensureInEventLoop();
-        return this.availableChannels.offer(channel);
+        boolean result = this.availableChannels.offer(channel);
+        if (result) {
+            this.availableChannelsSize.incrementAndGet();
+        }
+        return result;
     }
 
     /**
@@ -1343,7 +1356,7 @@ public final class RntbdClientChannelPool implements ChannelPool {
         RntbdPollChannelEvent event =
             RntbdChannelAcquisitionTimeline.startNewPollEvent(
                 channelAcquisitionTimeline,
-                this.availableChannels.size(),
+                this.availableChannelsSize.get(),
                 this.acquiredChannels.size(),
                 this.clientTelemetry);
 
@@ -1366,8 +1379,9 @@ public final class RntbdClientChannelPool implements ChannelPool {
             return first;
         }
 
-        this.availableChannels.offer(first);  // because we need a non-null sentinel to stop the search for a channel
-
+        if (this.availableChannels.offer(first)) {  // because we need a non-null sentinel to stop the search for a channel
+            this.availableChannelsSize.incrementAndGet();
+        }
         for (Channel next = this.availableChannels.pollFirst(); next != first; next = this.availableChannels.pollFirst()) {
             assert next != null : "impossible";
 
@@ -1381,11 +1395,15 @@ public final class RntbdClientChannelPool implements ChannelPool {
                 if (state.isOk()) {
                     return next;
                 }
-                this.availableChannels.offer(next);
+                if (this.availableChannels.offer(next)) {
+                    this.availableChannelsSize.incrementAndGet();
+                }
             }
         }
 
-        this.availableChannels.offer(first);  // we choose not to check any channel more than once in a single call
+        if (this.availableChannels.offer(first)) {  // we choose not to check any channel more than once in a single call
+            this.availableChannelsSize.incrementAndGet();
+        }
         return null;
     }
 
@@ -1563,7 +1581,7 @@ public final class RntbdClientChannelPool implements ChannelPool {
      */
     private void runTasksInPendingAcquisitionQueue() {
         this.ensureInEventLoop();
-        int channelsAvailable = this.availableChannels.size();
+        int channelsAvailable = this.availableChannelsSize.get();
 
         // NOTE: this potentially will cause unfair-ness with respect to task scheduling because
         // task from head of the pendingAcquisitions queue
