@@ -70,11 +70,23 @@ public final class CosmosBulkExecutionOptions {
         this(null, null, null);
     }
 
-    int getInitialMicroBatchSize() {
+    /**
+     * The initial micro batch size for bulk operations.
+     *
+     * @return initial micro batch size for bulk operations.
+     */
+    public int getInitialMicroBatchSize() {
         return initialMicroBatchSize;
     }
 
-    CosmosBulkExecutionOptions setInitialMicroBatchSize(int initialMicroBatchSize) {
+    /**
+     * Sets the initial micro batch size for bulk operations.
+     *
+     * @param initialMicroBatchSize initial micro batch size for bulk operations.
+     *
+     * @return the bulk processing options.
+     */
+    public CosmosBulkExecutionOptions setInitialMicroBatchSize(int  ) {
         this.initialMicroBatchSize = initialMicroBatchSize;
         return this;
     }
